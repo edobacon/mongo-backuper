@@ -1,0 +1,14 @@
+# Environment variables
+.env
+
+# Backup files
+/backups/
+
+# Configuration files
+/config/
+
+# Restore files
+/restore/
+
+# Node modules
+/node_modules/

@@ -1,0 +1,27 @@
+{
+  "name": "mongo-backup",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "setup": "node app/setup.js",
+    "backup": "node app/cli.js",
+    "backup:zip": "node app/cli.js --zip",
+    "backup:silent": "node app/cli.js --zip --log=off",
+    "backup:single": "node app/backup-single.js",
+    "restore": "node app/restore.js",
+    "info": "node app/info.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "archiver": "^5.3.1",
+    "date-fns": "^4.1.0",
+    "date-fns-tz": "^3.2.0",
+    "dotenv": "^16.5.0",
+    "fs-extra": "^11.1.0",
+    "mongodb": "^5.0.0",
+    "yargs": "^17.7.1"
+  }
+}
