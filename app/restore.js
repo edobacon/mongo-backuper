@@ -890,7 +890,7 @@ const restoreDatabase = async () => {
       if (mode === 'truncate') {
         // Find collections that aren't in the backup
         const collectionsNotInBackup = dbCollectionNames
-          .filter(name => !backupCollections.includes(name) && !name.startsWith('system.'));
+          .filter(name => typeof name === 'string' && !backupCollections.includes(name) && !name.startsWith('system.'));
 
         if (collectionsNotInBackup.length > 0) {
           console.log('\n=== COLLECTIONS NOT IN BACKUP ===');

@@ -133,15 +133,20 @@ const backupDatabases = async () => {
     // Process each connection
     for (const connection of connections) {
       const { name, uri } = connection;
+      // Validate uri
+      if (typeof uri !== 'string' || !(uri.startsWith('mongodb://') || uri.startsWith('mongodb+srv://'))) {
+        logError(`[${getTimestamp()}] Invalid or missing MongoDB URI for connection: ${name}. Value: ${JSON.stringify(uri)}`);
+        continue;
+      }
       log(`Processing database: ${name}`, argv.log === 'on');
 
       // Connect to the database
       const client = new MongoClient(uri);
 
       try {
-        log(`Attempting to connect to database: ${name}...`, argv.log === 'on');
+        log(`Intentando conectar a la base de datos: ${name}...`, true);
         await client.connect();
-        logSuccess(`Successfully connected to database: ${name}`, argv.log === 'on');
+        logSuccess(`✅ La base de datos '${name}' está ONLINE y la conexión fue exitosa.`, true);
 
         // List all available databases
         const adminDb = client.db().admin();
@@ -218,6 +223,21 @@ const backupDatabases = async () => {
         // Backup each collection
         for (const collectionInfo of collections) {
           const collectionName = collectionInfo.name;
+          if (typeof collectionName !== 'string') {
+            logError(`[${getTimestamp()}] Skipping collection with invalid name:`, collectionName);
+            continue;
+          }
+          try {
+            if (collectionName.startsWith('system.')) {
+              log(`Skipping system collection: ${collectionName}`, argv.log === 'on');
+              continue;
+            }
+          } catch (err) {
+            logError(`[${getTimestamp()}] Exception when checking collectionName.startsWith:`, collectionName);
+            logError(`[${getTimestamp()}] Error details: ${err.message}`);
+            logError(`[${getTimestamp()}] Stack trace: ${err.stack}`);
+            throw err;
+          }
           const collection = db.collection(collectionName);
           const outputPath = path.join(backupFolder, `${collectionName}.json`);
 
@@ -270,6 +290,7 @@ const backupDatabases = async () => {
     }
   } catch (error) {
     logError(`Error during backup: ${error.message}`);
+    console.trace(error)
     process.exit(1);
   }
 };
