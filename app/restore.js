@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const { MongoClient } = require('mongodb');
 const yargs = require('yargs/yargs');
 const { hideBin } = require('yargs/helpers');
-const { getTimestamp, log, logSuccess, logWarning, logError, createPrompt, askQuestion } = require('./utils');
+const { getTimestamp, log, logSuccess, logWarning, logError, logProgress, logProgressEnd, createPrompt, askQuestion } = require('./utils');
 require('dotenv').config();
 
 // Parse command line arguments
@@ -174,7 +174,7 @@ const processJsonFileInChunks = async (sourceFilePath, tempFolderPath, collectio
 
               // Calculate progress based on the total documents counted at the beginning
               const progressPercent = totalDocuments > 0 ? Math.round((processedCount / totalDocuments) * 100) : 0;
-              log(`Parsed JSON: ${progressPercent}% complete`);
+              logProgress(`Parsing JSON: ${progressPercent}% complete (${processedCount}/${totalDocuments})`);
 
               // Reset the current object
               currentObject = '';
@@ -203,7 +203,7 @@ const processJsonFileInChunks = async (sourceFilePath, tempFolderPath, collectio
 
                 // Calculate progress based on the total documents counted at the beginning
                 const progressPercent = totalDocuments > 0 ? Math.round((processedCount / totalDocuments) * 100) : 0;
-                log(`Parsed JSON after basic cleanup: ${progressPercent}% complete`);
+                logProgress(`Parsing JSON: ${progressPercent}% complete (${processedCount}/${totalDocuments})`);
               } catch (err2) {
                 // If that fails, try to extract a valid JSON object
                 try {
@@ -294,7 +294,7 @@ const processJsonFileInChunks = async (sourceFilePath, tempFolderPath, collectio
                       processedCount++;
                       // Calculate progress based on the total documents counted at the beginning
                       const progressPercent = totalDocuments > 0 ? Math.round((processedCount / totalDocuments) * 100) : 0;
-                      log(`Parsed extracted JSON: ${progressPercent}% complete`);
+                      logProgress(`Parsing JSON: ${progressPercent}% complete (${processedCount}/${totalDocuments})`);
                     } catch (parseErr) {
                       log(`Error parsing extracted object: ${parseErr.message}`);
                       log(`Extracted object: ${extractedObject.substring(0, 100)}...`);
@@ -312,7 +312,7 @@ const processJsonFileInChunks = async (sourceFilePath, tempFolderPath, collectio
                         processedCount++;
                         // Calculate progress based on the total documents counted at the beginning
                         const progressPercent = totalDocuments > 0 ? Math.round((processedCount / totalDocuments) * 100) : 0;
-                        log(`Parsed JSON (simple extraction): ${progressPercent}% complete`);
+                        logProgress(`Parsing JSON: ${progressPercent}% complete (${processedCount}/${totalDocuments})`);
                       } catch (simpleErr) {
                         log(`Error parsing object with simple extraction: ${simpleErr.message}`);
                         log(`Simple extracted content: ${simpleExtract.substring(0, 100)}...`);
@@ -333,7 +333,7 @@ const processJsonFileInChunks = async (sourceFilePath, tempFolderPath, collectio
                         processedCount++;
                         // Calculate progress based on the total documents counted at the beginning
                         const progressPercent = totalDocuments > 0 ? Math.round((processedCount / totalDocuments) * 100) : 0;
-                        log(`Parsed JSON (aggressive cleanup): ${progressPercent}% complete`);
+                        logProgress(`Parsing JSON: ${progressPercent}% complete (${processedCount}/${totalDocuments})`);
                       } catch (fixErr) {
                         // If all attempts fail, log the error and continue
                         log(`All parsing attempts failed: ${err2.message}`);
@@ -367,7 +367,7 @@ const processJsonFileInChunks = async (sourceFilePath, tempFolderPath, collectio
 
         // Calculate progress based on the total documents counted at the beginning
         const progressPercent = totalDocuments > 0 ? Math.round((processedCount / totalDocuments) * 100) : 0;
-        log(`Created batch file ${batchFileName} with ${currentBatch.length} documents (${progressPercent}% complete)`);
+        logProgress(`Batch ${batchFileName}: ${currentBatch.length} docs (${progressPercent}% complete)`);
 
         // Reset the current batch
         currentBatch = [];
@@ -383,6 +383,7 @@ const processJsonFileInChunks = async (sourceFilePath, tempFolderPath, collectio
         await writeBatchToFile();
       }
 
+      logProgressEnd();
       logSuccess(`Split file into ${batchCount} batch files with ${processedCount} processed documents out of ${totalDocuments} total`);
       resolve({ splitFiles, totalDocuments: processedCount });
     });
@@ -441,9 +442,10 @@ const splitJsonFile = async (sourceFilePath, tempFolderPath, batchSize) => {
         await fs.writeJson(batchFilePath, batchData);
         splitFiles.push(batchFilePath);
 
-        log(`Created batch file ${batchFileName} with ${batchData.length} documents (${Math.round((end / totalDocuments) * 100)}% complete)`);
+        logProgress(`Batch ${batchFileName}: ${batchData.length} docs (${Math.round((end / totalDocuments) * 100)}% complete)`);
       }
 
+      logProgressEnd();
       logSuccess(`Split ${fileName} into ${numBatches} batch files`);
       return { splitFiles, totalDocuments };
     } catch (readError) {
@@ -482,7 +484,7 @@ const restoreCollectionFromSplitFiles = async (db, splitFiles, collectionName, t
       const batchFilePath = splitFiles[i];
       const batchFileName = path.basename(batchFilePath);
 
-      log(`Processing batch file ${batchFileName} (${i + 1}/${splitFiles.length})`);
+      logProgress(`Processing batch file ${batchFileName} (${i + 1}/${splitFiles.length})`);
 
       // Read the batch file
       const batchData = await fs.readJson(batchFilePath);
@@ -493,12 +495,15 @@ const restoreCollectionFromSplitFiles = async (db, splitFiles, collectionName, t
         processedDocuments += batchData.length;
 
         const progressPercent = Math.round((processedDocuments / totalDocuments) * 100);
-        logSuccess(`Imported ${processedDocuments}/${totalDocuments} documents (${progressPercent}%)`);
+        logProgress(`Importing: ${processedDocuments}/${totalDocuments} documents (${progressPercent}%)`);
       }
     }
 
+    logProgressEnd();
+    logSuccess(`Imported ${processedDocuments}/${totalDocuments} documents`);
     return { success: true, count: processedDocuments };
   } catch (error) {
+    logProgressEnd();
     logError(`Error restoring collection from split files: ${error.message}`);
     return { success: false, error: error.message };
   }
@@ -857,7 +862,8 @@ const restoreDatabase = async () => {
 
     // Display confirmation message
     console.log('\n=== RESTORE CONFIRMATION ===');
-    console.log(`You are about to restore data to database: ${dbName}`);
+    console.log(`Destination URI: ${uri}`);
+    console.log(`Destination database: ${dbName}`);
     console.log(`From folder: ${folder}`);
     console.log(`Collections to restore: ${collectionsToRestore.length} of ${jsonFiles.length}`);
 

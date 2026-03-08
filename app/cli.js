@@ -4,7 +4,7 @@ const { MongoClient } = require('mongodb');
 const archiver = require('archiver');
 const yargs = require('yargs/yargs');
 const { hideBin } = require('yargs/helpers');
-const { getTimestamp, log, logSuccess, logWarning, logError, logAlways, createPrompt, askQuestion, askDatabaseSelection, createBackupFolderName } = require('./utils');
+const { getTimestamp, log, logSuccess, logWarning, logError, logAlways, logProgress, logProgressEnd, createPrompt, askQuestion, askDatabaseSelection, createBackupFolderName } = require('./utils');
 require('dotenv').config();
 
 // Parse command line arguments
@@ -79,11 +79,13 @@ const saveCollectionToJson = async (collection, outputPath) => {
 
     // Log progress
     const progressPercent = Math.round((processedCount / totalCount) * 100);
-    logSuccess(`Backed up ${processedCount}/${totalCount} documents (${progressPercent}%)`, argv.log === 'on');
+    logProgress(`Backed up ${processedCount}/${totalCount} documents (${progressPercent}%)`, argv.log === 'on');
 
     // Break if batch is smaller than batch size (last batch)
     if (batch.length < BATCH_SIZE) break;
   }
+
+  logProgressEnd(argv.log === 'on');
 
   // Close the JSON array
   await fs.appendFile(outputPath, '\n]', 'utf8');

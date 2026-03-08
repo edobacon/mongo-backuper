@@ -67,6 +67,22 @@ const logAlways = (message) => {
   logWithColor(message, colors.magenta);
 };
 
+// Function to log progress messages overwriting the previous line
+const logProgress = (message, logEnabled = true) => {
+  if (!logEnabled) return;
+  const timestamp = `${colors.brightWhite}[${getTimestamp()}]${colors.reset}`;
+  const colored = `${colors.cyan}${message}${colors.reset}`;
+  process.stdout.clearLine(0);
+  process.stdout.cursorTo(0);
+  process.stdout.write(`${timestamp} ${colored}`);
+};
+
+// Function to end the progress line (move to next line)
+const logProgressEnd = (logEnabled = true) => {
+  if (!logEnabled) return;
+  process.stdout.write('\n');
+};
+
 // Function to create a readline interface for user prompts
 const createPrompt = () => {
   return readline.createInterface({
@@ -124,6 +140,8 @@ module.exports = {
   logWarning,
   logError,
   logAlways,
+  logProgress,
+  logProgressEnd,
   createPrompt,
   askQuestion,
   askDatabaseSelection,
