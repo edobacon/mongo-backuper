@@ -1,6 +1,7 @@
 const fs = require('fs-extra');
 const path = require('path');
 const { MongoClient } = require('mongodb');
+const { EJSON } = require('bson');
 const archiver = require('archiver');
 const yargs = require('yargs/yargs');
 const { hideBin } = require('yargs/helpers');
@@ -54,7 +55,7 @@ const saveCollectionToJson = async (collection, outputPath) => {
   while (processedCount < totalCount) {
     // Only show batch processing details if collection size is greater than batch size
     if (totalCount > BATCH_SIZE) {
-      log(`Processing batch: ${processedCount + 1} to ${Math.min(processedCount + BATCH_SIZE, totalCount)} of ${totalCount} documents`, argv.log === 'on');
+      logProgress(`Processing batch: ${processedCount + 1} to ${Math.min(processedCount + BATCH_SIZE, totalCount)} of ${totalCount} documents`, argv.log === 'on');
     }
 
     // Get batch of documents
@@ -64,7 +65,7 @@ const saveCollectionToJson = async (collection, outputPath) => {
       .toArray();
 
     // Convert batch to JSON string
-    let batchJson = batch.map(doc => JSON.stringify(doc, null, 2)).join(',\n  ');
+    let batchJson = batch.map(doc => EJSON.stringify(doc, { relaxed: false }, 2)).join(',\n  ');
 
     // Add comma after previous batch if not first batch
     if (!isFirstBatch) {
@@ -123,7 +124,7 @@ const saveCollectionToCsv = async (collection, outputPath) => {
   while (processedCount < totalCount) {
     // Only show batch processing details if collection size is greater than batch size
     if (totalCount > BATCH_SIZE) {
-      log(`Processing batch: ${processedCount + 1} to ${Math.min(processedCount + BATCH_SIZE, totalCount)} of ${totalCount} documents`, argv.log === 'on');
+      logProgress(`Processing batch: ${processedCount + 1} to ${Math.min(processedCount + BATCH_SIZE, totalCount)} of ${totalCount} documents`, argv.log === 'on');
     }
 
     // Get batch of documents

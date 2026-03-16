@@ -2,6 +2,7 @@ const fs = require('fs-extra');
 const path = require('path');
 const crypto = require('crypto');
 const { MongoClient } = require('mongodb');
+const { EJSON } = require('bson');
 const yargs = require('yargs/yargs');
 const { hideBin } = require('yargs/helpers');
 const { getTimestamp, log, logSuccess, logWarning, logError, logProgress, logProgressEnd, createPrompt, askQuestion } = require('./utils');
@@ -110,24 +111,92 @@ const processJsonFileInChunks = async (sourceFilePath, tempFolderPath, collectio
     let currentBatch = [];
     let splitFiles = [];
 
-    // Create a read stream to process the file in chunks
     const stream = fs.createReadStream(sourceFilePath, { encoding: 'utf8' });
 
-    // Skip the opening bracket of the array
     let skipOpeningBracket = true;
 
-    stream.on('data', async (chunk) => {
-      // Process the chunk character by character
+    // Funcion para escribir el batch actual a archivo
+    const writeBatchToFile = async () => {
+      batchCount++;
+      const batchFileName = `${collectionName}_batch_${batchCount}.json`;
+      const batchFilePath = path.join(tempFolderPath, batchFileName);
+
+      try {
+        await fs.writeJson(batchFilePath, currentBatch);
+        splitFiles.push(batchFilePath);
+
+        const progressPercent = totalDocuments > 0 ? Math.round((processedCount / totalDocuments) * 100) : 0;
+        logProgress(`Batch ${batchFileName}: ${currentBatch.length} docs (${progressPercent}% complete)`);
+
+        currentBatch = [];
+      } catch (err) {
+        logError(`Error writing batch file: ${err.message}`);
+        reject(err);
+      }
+    };
+
+    // Funcion para parsear un objeto JSON con fallbacks y deserializar tipos BSON
+    const parseObject = (raw) => {
+      let parsed = null;
+
+      // Intento directo
+      try {
+        parsed = JSON.parse(raw);
+      } catch (_) { /* continuar con limpieza */ }
+
+      if (!parsed) {
+        // Limpiar coma final y espacios
+        let clean = raw.trim();
+        if (clean.endsWith(',')) {
+          clean = clean.slice(0, -1);
+        }
+
+        try {
+          parsed = JSON.parse(clean);
+        } catch (_) { /* continuar con extraccion */ }
+
+        if (!parsed) {
+          // Extraer entre primera { y ultima }
+          const firstBrace = clean.indexOf('{');
+          const lastBrace = clean.lastIndexOf('}');
+          if (firstBrace !== -1 && lastBrace > firstBrace) {
+            try {
+              parsed = JSON.parse(clean.substring(firstBrace, lastBrace + 1));
+            } catch (_) { /* continuar */ }
+          }
+        }
+
+        if (!parsed) {
+          // Ultimo recurso: eliminar caracteres de control
+          try {
+            let fixed = raw.trim().replace(/[\x00-\x1F\x7F-\x9F]/g, '');
+            parsed = JSON.parse(fixed);
+          } catch (_) { /* fallo total */ }
+        }
+      }
+
+      if (!parsed) return null;
+
+      // Deserializar Extended JSON a tipos BSON (ObjectId, Date, etc.)
+      try {
+        return EJSON.deserialize(parsed);
+      } catch (_) {
+        return parsed;
+      }
+    };
+
+    stream.on('data', (chunk) => {
+      // Pausar el stream para evitar race conditions con writeBatchToFile
+      stream.pause();
+
       for (let i = 0; i < chunk.length; i++) {
         const char = chunk[i];
 
-        // Skip the opening bracket of the array
         if (skipOpeningBracket && char === '[') {
           skipOpeningBracket = false;
           continue;
         }
 
-        // Handle escape sequences
         if (escapeNext) {
           currentObject += char;
           escapeNext = false;
@@ -140,17 +209,18 @@ const processJsonFileInChunks = async (sourceFilePath, tempFolderPath, collectio
           continue;
         }
 
-        // Special case: if we see a comma followed by an opening brace outside of a string,
-        // and we're not currently processing an object (depth === 0), skip the comma
-        if (char === ',' && !inString && depth === 0 && i + 1 < chunk.length && chunk[i + 1] === '{') {
-          // Skip this comma, don't add it to currentObject
+        // Ignorar comas entre objetos a nivel raiz (depth === 0, fuera de strings)
+        if (char === ',' && !inString && depth === 0) {
           continue;
         }
 
-        // Add the character to the current object
+        // Ignorar whitespace entre objetos a nivel raiz
+        if (depth === 0 && !inString && (char === ' ' || char === '\n' || char === '\r' || char === '\t' || char === ']')) {
+          continue;
+        }
+
         currentObject += char;
 
-        // Handle strings
         if (char === '"' && !escapeNext) {
           inString = !inString;
           continue;
@@ -158,234 +228,48 @@ const processJsonFileInChunks = async (sourceFilePath, tempFolderPath, collectio
 
         if (inString) continue;
 
-        // Handle array and object depth
         if (char === '{') {
           depth++;
         } else if (char === '}') {
           depth--;
 
-          // If we've reached the end of an object at depth 0, process it
           if (depth === 0) {
-            // Parse the object
-            try {
-              const obj = JSON.parse(currentObject);
+            const obj = parseObject(currentObject);
+            if (obj !== null) {
               currentBatch.push(obj);
               processedCount++;
 
-              // Calculate progress based on the total documents counted at the beginning
               const progressPercent = totalDocuments > 0 ? Math.round((processedCount / totalDocuments) * 100) : 0;
               logProgress(`Parsing JSON: ${progressPercent}% complete (${processedCount}/${totalDocuments})`);
-
-              // Reset the current object
-              currentObject = '';
-
-              // If we've reached the batch size, write the batch to a file
-              if (currentBatch.length >= batchSize) {
-                await writeBatchToFile();
-              }
-            } catch (err) {
-              // Try to clean up the object for parsing
-              let cleanObject = currentObject;
-
-              // If there's a comma after the object, remove it
-              if (cleanObject.endsWith(',')) {
-                cleanObject = cleanObject.slice(0, -1);
-              }
-
-              // Remove any whitespace at the beginning or end
-              cleanObject = cleanObject.trim();
-
-              // Try to parse the cleaned object
-              try {
-                const obj = JSON.parse(cleanObject);
-                currentBatch.push(obj);
-                processedCount++;
-
-                // Calculate progress based on the total documents counted at the beginning
-                const progressPercent = totalDocuments > 0 ? Math.round((processedCount / totalDocuments) * 100) : 0;
-                logProgress(`Parsing JSON: ${progressPercent}% complete (${processedCount}/${totalDocuments})`);
-              } catch (err2) {
-                // If that fails, try to extract a valid JSON object
-                try {
-                  // Use a non-recursive approach to find a valid JSON object
-                  // This avoids stack overflow with large or complex objects
-                  let extractedObject = null;
-
-                  // Check if the object is very large (> 1MB)
-                  const isVeryLarge = cleanObject.length > 1024 * 1024;
-
-                  // For very large objects, use a simpler approach to avoid performance issues
-                  if (isVeryLarge) {
-                    // log(`Object is very large (${(cleanObject.length / (1024 * 1024)).toFixed(2)} MB), using simple extraction`);
-                    const firstBrace = cleanObject.indexOf('{');
-                    const lastBrace = cleanObject.lastIndexOf('}');
-
-                    if (firstBrace !== -1 && lastBrace !== -1 && firstBrace < lastBrace) {
-                      extractedObject = cleanObject.substring(firstBrace, lastBrace + 1);
-                    }
-                  } else {
-                    // Try to manually track braces to find a complete JSON object
-                    try {
-                      let braceCount = 0;
-                      let startIndex = cleanObject.indexOf('{');
-                      let inString = false;
-                      let escapeNext = false;
-
-                      if (startIndex !== -1) {
-                        for (let i = startIndex; i < cleanObject.length; i++) {
-                          const char = cleanObject[i];
-
-                          // Handle escape sequences
-                          if (escapeNext) {
-                            escapeNext = false;
-                            continue;
-                          }
-
-                          if (char === '\\') {
-                            escapeNext = true;
-                            continue;
-                          }
-
-                          // Handle strings
-                          if (char === '"' && !escapeNext) {
-                            inString = !inString;
-                            continue;
-                          }
-
-                          // Only count braces outside of strings
-                          if (!inString) {
-                            if (char === '{') braceCount++;
-                            else if (char === '}') braceCount--;
-
-                            // When we've found a complete object
-                            if (braceCount === 0 && i > startIndex) {
-                              extractedObject = cleanObject.substring(startIndex, i + 1);
-                              break;
-                            }
-                          }
-                        }
-                      }
-                    } catch (bracketErr) {
-                      log(`Error tracking braces: ${bracketErr.message}`);
-                      // Log additional information to help diagnose the issue
-                      log(`Clean object length: ${cleanObject.length}`);
-                      log(`Start index: ${startIndex}`);
-
-                      // Fall back to simple extraction if brace tracking fails
-                      const firstBrace = cleanObject.indexOf('{');
-                      const lastBrace = cleanObject.lastIndexOf('}');
-
-                      if (firstBrace !== -1 && lastBrace !== -1 && firstBrace < lastBrace) {
-                        extractedObject = cleanObject.substring(firstBrace, lastBrace + 1);
-                        log(`Falling back to simple extraction after brace tracking error`);
-                      }
-                    }
-                  }
-
-                  // Log the result of failed extraction attempt
-                  if (!extractedObject) {
-                    log(`Failed to extract object using brace tracking`);
-                  }
-
-                  if (extractedObject) {
-                    try {
-                      const obj = JSON.parse(extractedObject);
-                      currentBatch.push(obj);
-                      processedCount++;
-                      // Calculate progress based on the total documents counted at the beginning
-                      const progressPercent = totalDocuments > 0 ? Math.round((processedCount / totalDocuments) * 100) : 0;
-                      logProgress(`Parsing JSON: ${progressPercent}% complete (${processedCount}/${totalDocuments})`);
-                    } catch (parseErr) {
-                      log(`Error parsing extracted object: ${parseErr.message}`);
-                      log(`Extracted object: ${extractedObject.substring(0, 100)}...`);
-                    }
-                  } else {
-                    // Try a simpler approach - find the first { and the last }
-                    const firstBrace = cleanObject.indexOf('{');
-                    const lastBrace = cleanObject.lastIndexOf('}');
-
-                    if (firstBrace !== -1 && lastBrace !== -1 && firstBrace < lastBrace) {
-                      const simpleExtract = cleanObject.substring(firstBrace, lastBrace + 1);
-                      try {
-                        const obj = JSON.parse(simpleExtract);
-                        currentBatch.push(obj);
-                        processedCount++;
-                        // Calculate progress based on the total documents counted at the beginning
-                        const progressPercent = totalDocuments > 0 ? Math.round((processedCount / totalDocuments) * 100) : 0;
-                        logProgress(`Parsing JSON: ${progressPercent}% complete (${processedCount}/${totalDocuments})`);
-                      } catch (simpleErr) {
-                        log(`Error parsing object with simple extraction: ${simpleErr.message}`);
-                        log(`Simple extracted content: ${simpleExtract.substring(0, 100)}...`);
-                        log(`Original error: ${err2.message}`);
-                        log(`Original object content: ${cleanObject.substring(0, 100)}...`);
-                      }
-                    } else {
-                      // Last resort: try to fix common JSON issues
-                      try {
-                        // Replace unescaped quotes in values
-                        let fixedJson = cleanObject.replace(/([^\\])"([^"]*[^\\])"([^:])/g, '$1\\"$2\\"$3');
-                        // Remove any control characters
-                        fixedJson = fixedJson.replace(/[\x00-\x1F\x7F-\x9F]/g, '');
-
-                        // Try to parse the fixed JSON
-                        const obj = JSON.parse(fixedJson);
-                        currentBatch.push(obj);
-                        processedCount++;
-                        // Calculate progress based on the total documents counted at the beginning
-                        const progressPercent = totalDocuments > 0 ? Math.round((processedCount / totalDocuments) * 100) : 0;
-                        logProgress(`Parsing JSON: ${progressPercent}% complete (${processedCount}/${totalDocuments})`);
-                      } catch (fixErr) {
-                        // If all attempts fail, log the error and continue
-                        log(`All parsing attempts failed: ${err2.message}`);
-                        log(`Object content: ${cleanObject.substring(0, 100)}...`); // Log the first 100 chars for debugging
-                      }
-                    }
-                  }
-                } catch (err3) {
-                  log(`Error in extraction process: ${err3.message}`);
-                  log(`Object content: ${cleanObject.substring(0, 100)}...`); // Log the first 100 chars for debugging
-                }
-              }
-
-              // Reset the current object
-              currentObject = '';
+            } else {
+              log(`Failed to parse object #${processedCount + 1}: ${currentObject.substring(0, 100)}...`);
             }
+
+            currentObject = '';
           }
         }
       }
+
+      // Escribir batch si alcanzo el tamano, luego reanudar el stream
+      if (currentBatch.length >= batchSize) {
+        writeBatchToFile().then(() => stream.resume()).catch(reject);
+      } else {
+        stream.resume();
+      }
     });
 
-    // Function to write the current batch to a file
-    const writeBatchToFile = async () => {
-      batchCount++;
-      const batchFileName = `${collectionName}_batch_${batchCount}.json`;
-      const batchFilePath = path.join(tempFolderPath, batchFileName);
-
+    stream.on('end', async () => {
       try {
-        await fs.writeJson(batchFilePath, currentBatch);
-        splitFiles.push(batchFilePath);
+        if (currentBatch.length > 0) {
+          await writeBatchToFile();
+        }
 
-        // Calculate progress based on the total documents counted at the beginning
-        const progressPercent = totalDocuments > 0 ? Math.round((processedCount / totalDocuments) * 100) : 0;
-        logProgress(`Batch ${batchFileName}: ${currentBatch.length} docs (${progressPercent}% complete)`);
-
-        // Reset the current batch
-        currentBatch = [];
+        logProgressEnd();
+        logSuccess(`Split file into ${batchCount} batch files with ${processedCount} processed documents out of ${totalDocuments} total`);
+        resolve({ splitFiles, totalDocuments: processedCount });
       } catch (err) {
-        logError(`Error writing batch file: ${err.message}`);
         reject(err);
       }
-    };
-
-    stream.on('end', async () => {
-      // Write any remaining objects to a file
-      if (currentBatch.length > 0) {
-        await writeBatchToFile();
-      }
-
-      logProgressEnd();
-      logSuccess(`Split file into ${batchCount} batch files with ${processedCount} processed documents out of ${totalDocuments} total`);
-      resolve({ splitFiles, totalDocuments: processedCount });
     });
 
     stream.on('error', (err) => {
@@ -489,10 +373,19 @@ const restoreCollectionFromSplitFiles = async (db, splitFiles, collectionName, t
       // Read the batch file
       const batchData = await fs.readJson(batchFilePath);
 
+      // Deserializar Extended JSON a tipos BSON (ObjectId, Date, etc.)
+      const deserializedData = batchData.map(doc => {
+        try {
+          return EJSON.deserialize(doc);
+        } catch (_) {
+          return doc;
+        }
+      });
+
       // Insert the data if there's any
-      if (batchData.length > 0) {
-        await collection.insertMany(batchData);
-        processedDocuments += batchData.length;
+      if (deserializedData.length > 0) {
+        await collection.insertMany(deserializedData);
+        processedDocuments += deserializedData.length;
 
         const progressPercent = Math.round((processedDocuments / totalDocuments) * 100);
         logProgress(`Importing: ${processedDocuments}/${totalDocuments} documents (${progressPercent}%)`);
@@ -636,7 +529,7 @@ const askRestoreMode = (rl) => {
   });
 };
 
-// Function to ask user to select a backup configuration
+// Function to ask user to select backup configurations (supports multiple selection)
 const askBackupConfigSelection = (rl, configs) => {
   return new Promise((resolve) => {
     console.log('\n=== AVAILABLE BACKUP CONFIGURATIONS ===');
@@ -655,54 +548,56 @@ const askBackupConfigSelection = (rl, configs) => {
       console.log(`   Destination DB: ${config.db}`);
     });
 
-    rl.question('\nEnter the number of the backup configuration you want to use: ', (answer) => {
-      const selection = parseInt(answer.trim());
-      if (isNaN(selection) || selection < 1 || selection > configs.length) {
-        console.log(`Invalid selection. Please enter a number between 1 and ${configs.length}.`);
-        // Ask again
+    console.log(`\nYou can select multiple configurations using commas (e.g. 1,3,5) or type "all" to select all.`);
+
+    rl.question('\nEnter your selection: ', (answer) => {
+      const trimmed = answer.trim().toLowerCase();
+
+      // Handle "all" selection
+      if (trimmed === 'all') {
+        console.log(`\nSelected all ${configs.length} configurations.`);
+        rl.close();
+        resolve(configs);
+        return;
+      }
+
+      // Parse comma-separated numbers
+      const parts = trimmed.split(',').map(s => s.trim());
+      const indices = [];
+      let valid = true;
+
+      for (const part of parts) {
+        const num = parseInt(part);
+        if (isNaN(num) || num < 1 || num > configs.length) {
+          valid = false;
+          break;
+        }
+        if (!indices.includes(num)) {
+          indices.push(num);
+        }
+      }
+
+      if (!valid || indices.length === 0) {
+        console.log(`Invalid selection. Enter numbers between 1 and ${configs.length}, separated by commas, or "all".`);
         rl.close();
         const newRl = createPrompt();
         resolve(askBackupConfigSelection(newRl, configs));
       } else {
-        const selectedConfig = configs[selection - 1];
-        resolve(selectedConfig);
+        const selectedConfigs = indices.map(i => configs[i - 1]);
+        console.log(`\nSelected ${selectedConfigs.length} configuration(s): ${selectedConfigs.map(c => c.db).join(', ')}`);
         rl.close();
+        resolve(selectedConfigs);
       }
     });
   });
 };
 
-// Main function to restore a database
-const restoreDatabase = async () => {
+// Function to restore a single configuration
+const restoreSingleConfig = async (config, mode, BATCH_SIZE) => {
   let tempFolderPath = null;
+  const { uri, db: dbName, folder } = config;
 
   try {
-    // Read restore configurations
-    const configPath = path.join(__dirname, '..', 'restore', 'config.json');
-    const configs = await fs.readJson(configPath);
-
-    // Check if configs is an array
-    if (!Array.isArray(configs)) {
-      logWarning('restore/config.json is not an array. Converting to array format...');
-      // Convert old format to new format
-      const oldConfig = configs;
-      const newConfigs = [oldConfig];
-      await fs.writeJson(configPath, newConfigs, { spaces: 2 });
-      logSuccess('Converted restore/config.json to array format');
-      // Use the converted config
-      const rl = createPrompt();
-      const selectedConfig = await askBackupConfigSelection(rl, newConfigs);
-      var { uri, db: dbName, folder } = selectedConfig;
-    } else {
-      // Ask user to select a configuration
-      const rl = createPrompt();
-      const selectedConfig = await askBackupConfigSelection(rl, configs);
-      var { uri, db: dbName, folder } = selectedConfig;
-    }
-
-    // Define batch size - read from .env or use default
-    const BATCH_SIZE = parseInt(process.env.BATCH_SIZE) || 50000;
-
     // Track if all restores were successful
     let allRestoresSuccessful = true;
 
@@ -731,11 +626,6 @@ const restoreDatabase = async () => {
 
     // Create temporary folder for split files
     tempFolderPath = await createTempFolder(dbName);
-
-    // Ask user to select a restore mode
-    const modeRl = createPrompt();
-    const mode = await askRestoreMode(modeRl);
-    log(`Selected restore mode: ${mode}`);
 
     // Get all backup files in the folder (JSON and CSV)
     const files = await fs.readdir(folder);
@@ -860,37 +750,6 @@ const restoreDatabase = async () => {
       }
     }
 
-    // Display confirmation message
-    console.log('\n=== RESTORE CONFIRMATION ===');
-    console.log(`Destination URI: ${uri}`);
-    console.log(`Destination database: ${dbName}`);
-    console.log(`From folder: ${folder}`);
-    console.log(`Collections to restore: ${collectionsToRestore.length} of ${jsonFiles.length}`);
-
-    const modeDescriptions = {
-      'add': 'ADD (data will be added to existing collections)',
-      'truncate': 'OVERWRITE (existing data will be deleted)',
-      'missing': 'MISSING COLLECTIONS (only missing or empty collections will be restored)'
-    };
-
-    console.log(`Mode: ${modeDescriptions[mode]}`);
-    console.log(`Batch size: ${BATCH_SIZE} documents`);
-    console.log('\nWARNING: This action cannot be undone. Existing data may be modified or deleted.');
-
-    // Ask for confirmation
-    const rl = createPrompt();
-    const answer = await askQuestion(rl, '\nDo you want to proceed with the restore? (yes/no): ');
-
-    if (answer.toLowerCase() !== 'yes' && answer.toLowerCase() !== 'y') {
-      log('Restore process cancelled by user');
-      // Clean up temporary folder
-      if (tempFolderPath) {
-        await cleanupTempFolder(tempFolderPath);
-      }
-      await client.close();
-      return;
-    }
-
     try {
       // If truncate mode is selected, check for collections that aren't in the backup
       if (mode === 'truncate') {
@@ -936,7 +795,7 @@ const restoreDatabase = async () => {
         if (tempFolderPath) {
           await cleanupTempFolder(tempFolderPath);
         }
-        return;
+        return true;
       }
 
       log(`Collections will be processed in batches of ${BATCH_SIZE} documents`);
@@ -966,10 +825,12 @@ const restoreDatabase = async () => {
       log(`Closed connection to database: ${db.databaseName}`);
 
       if (allRestoresSuccessful) {
-        logSuccess('Restore completed successfully');
+        logSuccess(`Restore of ${dbName} completed successfully`);
       } else {
-        logWarning('Restore process completed with errors');
+        logWarning(`Restore of ${dbName} completed with errors`);
       }
+
+      return allRestoresSuccessful;
     } catch (error) {
       logError(`Error during restore operation: ${error.message}`);
 
@@ -981,6 +842,7 @@ const restoreDatabase = async () => {
           // Ignore errors when closing an already failed connection
         }
       }
+      return false;
     } finally {
       // Clean up temporary folder
       if (tempFolderPath) {
@@ -988,13 +850,92 @@ const restoreDatabase = async () => {
       }
     }
   } catch (error) {
-    logError(`Error during restore: ${error.message}`);
+    logError(`Error during restore of ${dbName}: ${error.message}`);
 
     // Clean up temporary folder if it was created
     if (tempFolderPath) {
       await cleanupTempFolder(tempFolderPath);
     }
+    return false;
+  }
+};
 
+// Main function to restore databases
+const restoreDatabase = async () => {
+  try {
+    // Read restore configurations
+    const configPath = path.join(__dirname, '..', 'restore', 'config.json');
+    let configs = await fs.readJson(configPath);
+
+    // Check if configs is an array
+    if (!Array.isArray(configs)) {
+      logWarning('restore/config.json is not an array. Converting to array format...');
+      configs = [configs];
+      await fs.writeJson(configPath, configs, { spaces: 2 });
+      logSuccess('Converted restore/config.json to array format');
+    }
+
+    // Ask user to select configurations
+    const rl = createPrompt();
+    const selectedConfigs = await askBackupConfigSelection(rl, configs);
+
+    // Define batch size - read from .env or use default
+    const BATCH_SIZE = parseInt(process.env.BATCH_SIZE) || 50000;
+
+    // Ask user to select a restore mode (once for all)
+    const modeRl = createPrompt();
+    const mode = await askRestoreMode(modeRl);
+    log(`Selected restore mode: ${mode}`);
+
+    // Display confirmation message
+    const modeDescriptions = {
+      'add': 'ADD (data will be added to existing collections)',
+      'truncate': 'OVERWRITE (existing data will be deleted)',
+      'missing': 'MISSING COLLECTIONS (only missing or empty collections will be restored)'
+    };
+
+    console.log('\n=== RESTORE CONFIRMATION ===');
+    console.log(`Databases to restore: ${selectedConfigs.map(c => c.db).join(', ')}`);
+    console.log(`Mode: ${modeDescriptions[mode]}`);
+    console.log(`Batch size: ${BATCH_SIZE} documents`);
+    for (const config of selectedConfigs) {
+      console.log(`  - ${config.db}: ${config.uri} (from ${config.folder})`);
+    }
+    console.log('\nWARNING: This action cannot be undone. Existing data may be modified or deleted.');
+
+    // Ask for confirmation
+    const confirmRl = createPrompt();
+    const answer = await askQuestion(confirmRl, '\nDo you want to proceed with the restore? (yes/no): ');
+
+    if (answer.toLowerCase() !== 'yes' && answer.toLowerCase() !== 'y') {
+      log('Restore process cancelled by user');
+      return;
+    }
+
+    // Process each selected configuration
+    let allSuccessful = true;
+    for (let i = 0; i < selectedConfigs.length; i++) {
+      const config = selectedConfigs[i];
+      console.log(`\n${'='.repeat(60)}`);
+      console.log(`=== RESTORING DATABASE ${i + 1}/${selectedConfigs.length}: ${config.db} ===`);
+      console.log(`${'='.repeat(60)}`);
+
+      const success = await restoreSingleConfig(config, mode, BATCH_SIZE);
+      if (!success) {
+        allSuccessful = false;
+      }
+    }
+
+    if (selectedConfigs.length > 1) {
+      console.log(`\n${'='.repeat(60)}`);
+      if (allSuccessful) {
+        logSuccess(`All ${selectedConfigs.length} databases restored successfully`);
+      } else {
+        logWarning(`Restore process completed with errors`);
+      }
+    }
+  } catch (error) {
+    logError(`Error during restore: ${error.message}`);
     process.exit(1);
   }
 };
