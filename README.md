@@ -21,6 +21,9 @@ A Node.js application for backing up and restoring MongoDB databases. This utili
 - **Batch processing** for handling large collections efficiently
 - **Interactive restore mode selection** to choose between adding content or overwriting collections
 - **Backup information** to view details about backups
+- **ObjectId conversion** for restored databases where ObjectId fields are stored as strings
+- **Verification** of ObjectId field types with detailed per-collection reporting
+- **Resumable conversion** with progress tracking that survives crashes and interruptions
 
 ## Installation
 
@@ -48,8 +51,9 @@ FILE_FORMAT=json
 ```
 
 - `TIMEZONE`: Sets the timezone for log timestamps (default: UTC). Uses IANA timezone names (e.g., 'America/New_York', 'Europe/London', 'Asia/Tokyo').
-- `BATCH_SIZE`: Sets the number of documents to process in each batch when backing up or restoring large collections (default: 50000).
+- `BATCH_SIZE`: Sets the number of documents to process in each batch when backing up or restoring large collections (default: 50000). The convert command uses a default of 5000.
 - `FILE_FORMAT`: Sets the format for backup files. Supported values are 'json' and 'csv' (default: 'json'). Note that CSV restore functionality is not yet implemented.
+- `VERIFY_SAMPLE_SIZE`: Number of documents to sample for discovering field structure during verification (default: 500).
 
 ### Backup Configuration
 
@@ -196,6 +200,60 @@ This command will:
 - Process documents in batches according to the BATCH_SIZE setting
 - Log the progress, showing which collections are being processed and the percentage complete
 - Clean up the temporary folder after the restore is complete
+
+### Convert Command
+
+Converts string fields that should be ObjectId to native ObjectId in restored databases:
+
+```
+npm run convert
+```
+
+This command is designed to fix a common issue after restoring backups where ObjectId fields (like `_id` and reference fields used for `populate`) are stored as plain strings instead of native `ObjectId` types.
+
+This command will:
+- Read restore configurations from `restore/config.json` and ask you to select a database
+- **Detect fields** that need conversion by examining document structure and querying MongoDB directly with `$type: 'string'` for each candidate field
+- Detect fields in nested objects and subdocuments inside arrays (e.g., `data.$._id`)
+- Show a summary of fields to convert per collection, classified as `_id` or `ref`
+- Ask for confirmation before proceeding
+- **Convert all fields of a document simultaneously** in a single `$set` operation, instead of one pass per field
+- Process documents in batches according to the `BATCH_SIZE` setting (default: 5000)
+- Handle `_id` conversion separately (requires delete + insert since MongoDB doesn't allow modifying `_id` in-place)
+- **Save progress** to `convert/progress.json` after each collection, allowing the process to be resumed if interrupted
+- Show progress percentage during conversion, including per-document progress for collections with large subdocument arrays
+
+#### Resuming an interrupted conversion
+
+If the process is interrupted (crash, network failure, manual stop), running `npm run convert` again will detect the pending progress and offer three options:
+- `yes`: Resume from where it left off, skipping already converted fields
+- `discard`: Delete the progress file and start fresh
+- `no`: Cancel
+
+The conversion operations are idempotent — the filter `$type: 'string'` only matches documents that haven't been converted yet, so re-running is safe.
+
+> **Note:** Running `npm run restore` on the same database will automatically discard any pending convert progress, since the restore invalidates previous conversions.
+
+### Verify Command
+
+Verifies that a restored database has all ObjectId fields correctly typed:
+
+```
+npm run verify
+```
+
+This command will:
+- Read restore configurations from `restore/config.json` and ask you to select a database
+- Check for truncated convert processes (`convert/progress.json`), including detection of interrupted `_id` conversions that may have caused data loss
+- If a progress file exists, compare current document counts against the counts recorded before conversion
+- **Scan each collection** by examining document structure and querying MongoDB directly with `countDocuments` for each candidate field
+- Show a detailed report of all fields reviewed per collection, classified as `_id` or `ref`, with status `OK` (green) or the count of documents with strings (red)
+- Report issues by severity: `CRITICAL` > `ERROR` > `WARNING` > `INFO`
+- Exit with code `0` if clean, `1` if problems are found
+
+#### Environment variables
+
+- `VERIFY_SAMPLE_SIZE`: Number of documents to sample for discovering field structure (default: 500). The actual verification uses `countDocuments` against the full collection, not just the sample.
 
 ### Information Command
 

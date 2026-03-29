@@ -912,6 +912,22 @@ const restoreDatabase = async () => {
       return;
     }
 
+    // Limpiar progreso de convert si coincide con alguna DB que se va a restaurar
+    const convertProgressPath = path.join(__dirname, '..', 'convert', 'progress.json');
+    if (await fs.pathExists(convertProgressPath)) {
+      try {
+        const convertProgress = await fs.readJson(convertProgressPath);
+        const restoreDbNames = selectedConfigs.map(c => c.db);
+
+        if (restoreDbNames.includes(convertProgress.dbName)) {
+          await fs.remove(convertProgressPath);
+          logWarning(`Progreso de convert para "${convertProgress.dbName}" descartado (el restore lo invalida)`);
+        }
+      } catch (_) {
+        // Si no se puede leer, ignorar
+      }
+    }
+
     // Process each selected configuration
     let allSuccessful = true;
     for (let i = 0; i < selectedConfigs.length; i++) {

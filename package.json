@@ -9,7 +9,9 @@
     "backup:silent": "node app/cli.js --zip --log=off",
     "backup:single": "node app/backup-single.js",
     "restore": "node app/restore.js",
-    "info": "node app/info.js"
+    "info": "node app/info.js",
+    "convert": "node app/convert.js",
+    "verify": "node app/verify.js"
   },
   "keywords": [],
   "author": "",
